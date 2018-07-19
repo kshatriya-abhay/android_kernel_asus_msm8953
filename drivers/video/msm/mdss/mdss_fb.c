@@ -76,6 +76,18 @@
 #define BLANK_FLAG_ULP	FB_BLANK_NORMAL
 #endif
 
+//austin+++
+#define COMMIT_FRAMES_COUNT 5
+int display_commit_cnt = COMMIT_FRAMES_COUNT;
+u32 g_update_bl = 0; /* ASUS BSP Display, to record bl level from HAL*/
+extern void set_tcon_cmd(char *cmd, short len);
+extern char cabc_mode[2];
+extern char dimming_cmd[2];
+extern char ctc_bl_cmd[3];
+extern char tm_bl_cmd[2];
+extern int g_ftm_mode;
+//austin---
+
 /*
  * Time period for fps calulation in micro seconds.
  * Default value is set to 1 sec.
@@ -1680,6 +1692,7 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 			if (mfd->bl_level != bkl_lvl)
 				bl_notify_needed = true;
 			pr_debug("backlight sent to panel :%d\n", temp);
+			g_update_bl = temp;
 			pdata->set_backlight(pdata, temp);
 			mfd->bl_level = bkl_lvl;
 			mfd->bl_level_scaled = temp;
@@ -1714,6 +1727,7 @@ void mdss_fb_update_backlight(struct msm_fb_data_type *mfd)
 				mdss_fb_bl_update_notify(mfd,
 					NOTIFY_TYPE_BL_AD_ATTEN_UPDATE);
 			mdss_fb_bl_update_notify(mfd, NOTIFY_TYPE_BL_UPDATE);
+			g_update_bl = temp;
 			pdata->set_backlight(pdata, temp);
 			mfd->bl_level_scaled = mfd->unset_bl_level;
 			mfd->allow_bl_update = true;
@@ -2010,6 +2024,9 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 		req_power_state = MDSS_PANEL_POWER_OFF;
 		pr_debug("blank powerdown called\n");
 		ret = mdss_fb_blank_blank(mfd, req_power_state);
+		//austin+++
+		display_commit_cnt = COMMIT_FRAMES_COUNT;
+		//austin---
 		break;
 	}
 
@@ -3174,7 +3191,7 @@ static int mdss_fb_pan_display_ex(struct fb_info *info,
 	if (var->yoffset > (info->var.yres_virtual - info->var.yres))
 		return -EINVAL;
 
-	ret = mdss_fb_pan_idle(mfd);
+	ret = mdss_fb_wait_for_kickoff(mfd);
 	if (ret) {
 		pr_err("wait_for_kick failed. rc=%d\n", ret);
 		return ret;
@@ -3410,6 +3427,11 @@ int mdss_fb_atomic_commit(struct fb_info *info,
 	if (wait_for_finish)
 		ret = mdss_fb_pan_idle(mfd);
 
+	if (display_commit_cnt > 0) {
+       		 printk("fb%d dpc\n", info->node);
+        	 display_commit_cnt--;
+    }
+
 end:
 	if (ret && (mfd->panel.type == WRITEBACK_PANEL) && wb_change)
 		mdss_fb_update_resolution(mfd, old_xres, old_yres, old_format);
@@ -3643,9 +3665,6 @@ skip_commit:
 	if (IS_ERR_VALUE(ret) || !sync_pt_data->flushed) {
 		mdss_fb_release_kickoff(mfd);
 		mdss_fb_signal_timeline(sync_pt_data);
-		if ((mfd->panel.type == MIPI_CMD_PANEL) &&
-			(mfd->mdp.signal_retire_fence))
-			mfd->mdp.signal_retire_fence(mfd, 1);
 	}
 
 	if (dynamic_dsi_switch) {
@@ -4473,7 +4492,6 @@ static int mdss_fb_atomic_commit_ioctl(struct fb_info *info,
 	struct mdp_frc_info *frc_info = NULL;
 	struct mdp_frc_info __user *frc_info_user;
 	struct msm_fb_data_type *mfd;
-	struct mdss_overlay_private *mdp5_data = NULL;
 
 	ret = copy_from_user(&commit, argp, sizeof(struct mdp_layer_commit));
 	if (ret) {
@@ -4485,20 +4503,9 @@ static int mdss_fb_atomic_commit_ioctl(struct fb_info *info,
 	if (!mfd)
 		return -EINVAL;
 
-	mdp5_data = mfd_to_mdp5_data(mfd);
-
 	if (mfd->panel_info->panel_dead) {
 		pr_debug("early commit return\n");
 		MDSS_XLOG(mfd->panel_info->panel_dead);
-		/*
-		 * In case of an ESD attack, since we early return from the
-		 * commits, we need to signal the outstanding fences.
-		 */
-		mdss_fb_release_fences(mfd);
-		if ((mfd->panel.type == MIPI_CMD_PANEL) &&
-			mfd->mdp.signal_retire_fence && mdp5_data)
-			mfd->mdp.signal_retire_fence(mfd,
-						mdp5_data->retire_cnt);
 		return 0;
 	}
 
@@ -4788,6 +4795,7 @@ int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
 	struct mdp_buf_sync buf_sync;
 	unsigned int dsi_mode = 0;
 	struct mdss_panel_data *pdata = NULL;
+	int panel_cabc_mode = Still_MODE;	// ASUS BSP Display +++
 
 	if (!info || !info->par)
 		return -EINVAL;
@@ -4848,6 +4856,22 @@ int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
 	case MSMFB_DISPLAY_COMMIT:
 		ret = mdss_fb_display_commit(info, argp);
 		break;
+
+	// ASUS BSP Display +++
+	case MSMFB_CABC_CTRL:
+		ret = copy_from_user(&panel_cabc_mode, argp, sizeof(panel_cabc_mode));
+		if (ret) {
+			pr_err("%s: CABC mode(%d) set failed\n", __func__, panel_cabc_mode);
+			goto exit;
+		}
+		if (g_ftm_mode) {
+			pr_err("[Display] Factory mode: CABC isn't allow to set\n");
+			break;
+		}
+        cabc_mode[1] = panel_cabc_mode;
+        set_tcon_cmd(cabc_mode, ARRAY_SIZE(cabc_mode));
+		break;
+	// ASUS BSP Display ---
 
 	case MSMFB_LPM_ENABLE:
 		ret = copy_from_user(&dsi_mode, argp, sizeof(dsi_mode));

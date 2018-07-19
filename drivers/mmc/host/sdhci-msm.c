@@ -2,7 +2,7 @@
  * drivers/mmc/host/sdhci-msm.c - Qualcomm MSM SDHCI Platform
  * driver source file
  *
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -325,6 +325,24 @@ static ssize_t show_auto_cmd21(struct device *dev,
 
 	return snprintf(buf, PAGE_SIZE, "%d\n", msm_host->en_auto_cmd21);
 }
+
+//ASUS_BSP Deeo : add for sd_status +++
+static ssize_t store_cd_status(struct device *dev, struct device_attribute
+				*attr, const char *buf, size_t count)
+{
+	return count;
+}
+
+static ssize_t show_cd_status(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", !gpio_get_value(msm_host->pdata->status_gpio));
+}
+//ASUS_BSP Deeo : add for sd_status ---
 
 /* MSM auto-tuning handler */
 static int sdhci_msm_config_auto_tuning_cmd(struct sdhci_host *host,
@@ -2186,8 +2204,15 @@ static int sdhci_msm_setup_vreg(struct sdhci_msm_pltfm_data *pdata,
 		goto out;
 	}
 
-	vreg_table[0] = curr_slot->vdd_data;
-	vreg_table[1] = curr_slot->vdd_io_data;
+	//ASUS_BSP : adjust SD power off sequence +++
+	if (!strcmp(pdata->name,"mmc1") && !enable) {
+		vreg_table[1] = curr_slot->vdd_data;
+		vreg_table[0] = curr_slot->vdd_io_data;
+	} else {
+		vreg_table[0] = curr_slot->vdd_data;
+		vreg_table[1] = curr_slot->vdd_io_data;
+	}
+	//ASUS_BSP : adjust SD power off sequence ---
 
 	for (i = 0; i < ARRAY_SIZE(vreg_table); i++) {
 		if (vreg_table[i]) {
@@ -3657,10 +3682,11 @@ void sdhci_msm_pm_qos_cpu_init(struct sdhci_host *host,
 		group->latency = latency[i].latency[SDHCI_PERFORMANCE_MODE];
 		pm_qos_add_request(&group->req, PM_QOS_CPU_DMA_LATENCY,
 			group->latency);
-		pr_info("%s (): voted for group #%d (mask=0x%lx) latency=%d\n",
+		pr_info("%s (): voted for group #%d (mask=0x%lx) latency=%d (0x%p)\n",
 			__func__, i,
 			group->req.cpus_affine.bits[0],
-			group->latency);
+			group->latency,
+			&latency[i].latency[SDHCI_PERFORMANCE_MODE]);
 	}
 	msm_host->pm_qos_prev_cpu = -1;
 	msm_host->pm_qos_group_enable = true;
@@ -3935,6 +3961,7 @@ static bool sdhci_msm_is_bootdevice(struct device *dev)
 	return true;
 }
 
+extern void create_emmc_health_proc_file(void);  //ASUS_BSP Deeo : add proc file node for eMMC health +++
 static int sdhci_msm_probe(struct platform_device *pdev)
 {
 	struct sdhci_host *host;
@@ -3967,6 +3994,8 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	pltfm_host->priv = msm_host;
 	msm_host->mmc = host->mmc;
 	msm_host->pdev = pdev;
+
+	printk("[MMC] hostname : %s\n", mmc_hostname(msm_host->mmc));
 
 	/* get the ice device vops if present */
 	ret = sdhci_msm_ice_get_dev(host);
@@ -4024,6 +4053,14 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "DT parsing error\n");
 			goto pltfm_free;
 		}
+
+		//ASUS_BSP Deeo : add host_name to pdata +++
+		if (!strcmp(mmc_hostname(msm_host->mmc),"mmc1"))
+			msm_host->pdata->name = "mmc1";
+		else
+			msm_host->pdata->name = "";
+		//ASUS_BSP Deeo : add host_name to pdata ---
+
 	} else {
 		dev_err(&pdev->dev, "No device tree node\n");
 		goto pltfm_free;
@@ -4156,6 +4193,8 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 			goto vreg_deinit;
 		}
 		writel_relaxed(readl_relaxed(tlmm_mem) | 0x2, tlmm_mem);
+		dev_dbg(&pdev->dev, "tlmm reg %pa value 0x%08x\n",
+				&tlmm_memres->start, readl_relaxed(tlmm_mem));
 	}
 
 	/*
@@ -4408,6 +4447,29 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		       mmc_hostname(host->mmc), __func__, ret);
 		device_remove_file(&pdev->dev, &msm_host->auto_cmd21_attr);
 	}
+
+	//ASUS BSP Deeo : add for sd_status +++
+	if (!strcmp("mmc1",mmc_hostname(host->mmc))) {
+		msm_host->cd_status_attr.show = show_cd_status;
+		msm_host->cd_status_attr.store = store_cd_status;
+		sysfs_attr_init(&msm_host->cd_status_attr.attr);
+		msm_host->cd_status_attr.attr.name = "cd_gpio_status";
+		msm_host->cd_status_attr.attr.mode = S_IRUGO | S_IWUSR;
+		ret = device_create_file(&pdev->dev, &msm_host->cd_status_attr);
+		if (ret) {
+			pr_err("%s: %s: failed creating auto-cmd21 attr: %d\n",
+				   mmc_hostname(host->mmc), __func__, ret);
+			device_remove_file(&pdev->dev, &msm_host->cd_status_attr);
+		}
+	}
+	//ASUS BSP Deeo : add for sd_status ---
+
+	//ASUS BSP Deeo : create proc file +++
+	if (!strcmp("mmc0",mmc_hostname(host->mmc))) {
+		create_emmc_health_proc_file();
+	}
+	//ASUS BSP Deeo : create proc file ---
+
 	/* Successful initialization */
 	goto out;
 

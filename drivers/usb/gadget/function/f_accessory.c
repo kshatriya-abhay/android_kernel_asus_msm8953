@@ -55,6 +55,9 @@
 #define TX_REQ_MAX 4
 #define RX_REQ_MAX 2
 
+#undef pr_debug
+#define pr_debug pr_info
+
 struct acc_hid_dev {
 	struct list_head	list;
 	struct hid_device *hid;
@@ -878,12 +881,6 @@ int acc_ctrlrequest(struct usb_composite_dev *cdev,
 	u16	w_length = le16_to_cpu(ctrl->wLength);
 	unsigned long flags;
 
-	/*
-	 * If instance is not created which is the case in power off charging
-	 * mode, dev will be NULL. Hence return error if it is the case.
-	 */
-	if (!dev)
-		return -ENODEV;
 /*
 	printk(KERN_INFO "acc_ctrlrequest "
 			"%02x.%02x v%04x i%04x l%u\n",

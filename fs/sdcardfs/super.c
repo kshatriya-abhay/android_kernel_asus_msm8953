@@ -72,6 +72,7 @@ static int sdcardfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	int err;
 	struct path lower_path;
 	u32 min_blocks;
+	u32 thres_blocks;	//ASUS_BSP Deeo : thres hold in block
 	struct sdcardfs_sb_info *sbi = SDCARDFS_SB(dentry->d_sb);
 
 	sdcardfs_get_lower_path(dentry, &lower_path);
@@ -79,6 +80,9 @@ static int sdcardfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	sdcardfs_put_lower_path(dentry, &lower_path);
 
 	if (sbi->options.reserved_mb) {
+		//pr_err("[ASUS] sdcardfs_statfs, sbi->options.reserved_mb %d\n", sbi->options.reserved_mb);
+		//pr_err("[ASUS] sdcardfs_statfs, THRES_SIZE %d\n", THRES_SIZE);
+
 		/* Invalid statfs informations. */
 		if (buf->f_bsize == 0) {
 			pr_err("Returned block size is zero.\n");
@@ -86,6 +90,7 @@ static int sdcardfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 		}
 
 		min_blocks = ((sbi->options.reserved_mb * 1024 * 1024)/buf->f_bsize);
+		thres_blocks = ((THRES_SIZE * 1024 * 1024)/buf->f_bsize);	//ASUS_BSP Deeo : thres hold in block
 		buf->f_blocks -= min_blocks;
 
 		if (buf->f_bavail > min_blocks)
@@ -93,8 +98,13 @@ static int sdcardfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 		else
 			buf->f_bavail = 0;
 
+		//pr_err("[ASUS] f_bfree %llu\n", buf->f_bfree);
+		//pr_err("[ASUS] thres_blocks %u\n", thres_blocks);
+
 		/* Make reserved blocks invisiable to media storage */
-		buf->f_bfree = buf->f_bavail;
+		if (buf->f_bfree < thres_blocks) {	//ASUS_BSP Deeo : when free space less then threshold, enable invisible
+			buf->f_bfree = buf->f_bavail;
+		}
 	}
 
 	/* set return buf to our f/s to avoid confusing user-level utils */
@@ -215,9 +225,6 @@ static struct inode *sdcardfs_alloc_inode(struct super_block *sb)
 
 	i->data = d;
 	kref_init(&d->refcount);
-	i->top_data = d;
-	spin_lock_init(&i->top_lock);
-	kref_get(&d->refcount);
 
 	i->vfs_inode.i_version = 1;
 	return &i->vfs_inode;
@@ -307,8 +314,6 @@ static int sdcardfs_show_options(struct vfsmount *mnt, struct seq_file *m,
 		seq_printf(m, ",userid=%u", opts->fs_user_id);
 	if (opts->gid_derivation)
 		seq_puts(m, ",derive_gid");
-	if (opts->default_normal)
-		seq_puts(m, ",default_normal");
 	if (opts->reserved_mb != 0)
 		seq_printf(m, ",reserved=%uMB", opts->reserved_mb);
 

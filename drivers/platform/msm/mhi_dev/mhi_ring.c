@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -71,12 +71,15 @@ int mhi_dev_fetch_ring_elements(struct mhi_dev_ring *ring,
 			host_addr.device_va = ring->ring_shadow.device_va;
 			host_addr.host_pa = ring->ring_shadow.host_pa;
 			host_addr.virt_addr = &ring->ring_cache[0];
-			host_addr.phy_addr = ring->ring_cache_dma_handle;
+			host_addr.phy_addr = (ring->ring_cache_dma_handle +
+				sizeof(union mhi_dev_ring_element_type) *
+				start);
 			host_addr.size = (end *
 				sizeof(union mhi_dev_ring_element_type));
 			mhi_dev_read_from_host(ring->mhi_dev, &host_addr);
 		}
 	}
+
 	return 0;
 }
 
@@ -263,12 +266,10 @@ int mhi_dev_process_ring(struct mhi_dev_ring *ring)
 EXPORT_SYMBOL(mhi_dev_process_ring);
 
 int mhi_dev_add_element(struct mhi_dev_ring *ring,
-				union mhi_dev_ring_element_type *element,
-				struct event_req *ereq, int evt_offset)
+				union mhi_dev_ring_element_type *element)
 {
 	uint32_t old_offset = 0;
 	struct mhi_addr host_addr;
-	uint32_t num_elem = 0;
 
 	if (!ring || !element) {
 		pr_err("%s: Invalid context\n", __func__);
@@ -284,18 +285,11 @@ int mhi_dev_add_element(struct mhi_dev_ring *ring,
 
 	old_offset = ring->rd_offset;
 
-	if (evt_offset) {
-		num_elem = evt_offset /
-			(sizeof(union mhi_dev_ring_element_type));
-		ring->rd_offset += num_elem;
-		if (ring->rd_offset >= ring->ring_size)
-			ring->rd_offset -= ring->ring_size;
-	} else
-		mhi_dev_ring_inc_index(ring, ring->rd_offset);
+	mhi_dev_ring_inc_index(ring, ring->rd_offset);
 
 	ring->ring_ctx->generic.rp = (ring->rd_offset *
-		sizeof(union mhi_dev_ring_element_type)) +
-		ring->ring_ctx->generic.rbase;
+				sizeof(union mhi_dev_ring_element_type)) +
+				ring->ring_ctx->generic.rbase;
 	/*
 	 * Write the element, ring_base has to be the
 	 * iomap of the ring_base for memcpy
@@ -309,22 +303,14 @@ int mhi_dev_add_element(struct mhi_dev_ring *ring,
 			sizeof(union mhi_dev_ring_element_type) * old_offset;
 
 	host_addr.virt_addr = element;
-
-	if (evt_offset)
-		host_addr.size = evt_offset;
-	else
-		host_addr.size = sizeof(union mhi_dev_ring_element_type);
+	host_addr.size = sizeof(union mhi_dev_ring_element_type);
 
 	mhi_log(MHI_MSG_VERBOSE, "adding element to ring (%d)\n", ring->id);
 	mhi_log(MHI_MSG_VERBOSE, "rd_ofset %d\n", ring->rd_offset);
 	mhi_log(MHI_MSG_VERBOSE, "type %d\n", element->generic.type);
 
-	if (ereq)
-		mhi_dev_write_to_host(ring->mhi_dev, &host_addr,
-				ereq, MHI_DEV_DMA_ASYNC);
-	else
-		mhi_dev_write_to_host(ring->mhi_dev, &host_addr,
-				NULL, MHI_DEV_DMA_SYNC);
+	mhi_dev_write_to_host(ring->mhi_dev, &host_addr);
+
 	return 0;
 }
 EXPORT_SYMBOL(mhi_dev_add_element);
@@ -382,9 +368,10 @@ int mhi_ring_start(struct mhi_dev_ring *ring, union mhi_dev_ring_ctx *ctx,
 		(union mhi_dev_ring_ctx *) (mhi->ch_ctx_shadow.device_va +
 		(ring->id - mhi->ch_ring_start)*sizeof(union mhi_dev_ring_ctx));
 
+
 	ring->ring_ctx_shadow = ring->ring_ctx;
 
-	if (ring->type != RING_TYPE_ER || ring->type != RING_TYPE_CH) {
+	if (ring->type != RING_TYPE_ER) {
 		rc = mhi_dev_cache_ring(ring, wr_offset);
 		if (rc)
 			return rc;

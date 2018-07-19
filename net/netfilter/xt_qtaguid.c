@@ -668,7 +668,12 @@ static void pp_iface_stat_header(struct seq_file *m)
 		 "rx_other_bytes rx_other_packets "
 		 "tx_tcp_bytes tx_tcp_packets "
 		 "tx_udp_bytes tx_udp_packets "
-		 "tx_other_bytes tx_other_packets\n"
+		 "tx_other_bytes tx_other_packets "
+                 //ASUS_BSP Johnny +++[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+                 "rx_dns_bytes rx_dns_packets "
+                 "tx_dns_bytes tx_dns_packets\n"
+                 //ASUS_BSP Johnny ---[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+                 
 	);
 }
 
@@ -679,7 +684,7 @@ static void pp_iface_stat_line(struct seq_file *m,
 	int cnt_set = 0;   /* We only use one set for the device */
 	cnts = &iface_entry->totals_via_skb;
 	seq_printf(m, "%s %llu %llu %llu %llu %llu %llu %llu %llu "
-		   "%llu %llu %llu %llu %llu %llu %llu %llu\n",
+		   "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n", // Johnny yujoe
 		   iface_entry->ifname,
 		   dc_sum_bytes(cnts, cnt_set, IFS_RX),
 		   dc_sum_packets(cnts, cnt_set, IFS_RX),
@@ -696,7 +701,13 @@ static void pp_iface_stat_line(struct seq_file *m,
 		   cnts->bpc[cnt_set][IFS_TX][IFS_UDP].bytes,
 		   cnts->bpc[cnt_set][IFS_TX][IFS_UDP].packets,
 		   cnts->bpc[cnt_set][IFS_TX][IFS_PROTO_OTHER].bytes,
-		   cnts->bpc[cnt_set][IFS_TX][IFS_PROTO_OTHER].packets);
+		   cnts->bpc[cnt_set][IFS_TX][IFS_PROTO_OTHER].packets,
+                   //ASUS_BSP Johnny +++[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+                   cnts->bpc[cnt_set][IFS_RX][IFS_DNS].bytes,
+                   cnts->bpc[cnt_set][IFS_RX][IFS_DNS].packets,
+                   cnts->bpc[cnt_set][IFS_TX][IFS_DNS].bytes,
+                   cnts->bpc[cnt_set][IFS_TX][IFS_DNS].packets);
+                   //ASUS_BSP Johnny ---[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
 }
 
 struct proc_iface_stat_fmt_info {
@@ -1099,6 +1110,15 @@ static int ipx_proto(const struct sk_buff *skb,
 	return tproto;
 }
 
+//ASUS_BSP Johnny +++[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+static void
+data_counters_update_dns(struct data_counters *dc, int set,
+                enum ifs_tx_rx direction, int proto, int bytes)
+{
+        dc_add_byte_packets(dc, set, direction, IFS_DNS, bytes, 1);
+}
+//ASUS_BSP Johnny ---[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+
 static void
 data_counters_update(struct data_counters *dc, int set,
 		     enum ifs_tx_rx direction, int proto, int bytes)
@@ -1218,6 +1238,11 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
 	enum ifs_tx_rx direction;
 	int bytes = skb->len;
 	int proto;
+        //ASUS_BSP Johnny +++[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+        unsigned short uhDnsPort = htons(53);
+        struct iphdr *iph;
+        struct udphdr *udph;
+        //ASUS_BSP Johnny ---[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
 
 	get_dev_and_dir(skb, par, &direction, &el_dev);
 	proto = ipx_proto(skb, par);
@@ -1237,6 +1262,17 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
 
 	IF_DEBUG("qtaguid[%d]: %s(%s): entry=%p\n", par->hooknum,  __func__,
 		 el_dev->name, entry);
+
+        //ASUS_BSP Johnny +++[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
+        iph = ip_hdr(skb);
+        if (proto == IPPROTO_UDP) {
+                udph = (struct udphdr *)(skb->data + iph->ihl*4);
+                if (udph->dest == uhDnsPort || udph->source == uhDnsPort) {
+                        data_counters_update_dns(&entry->totals_via_skb, 0,
+                                        direction, proto, bytes);
+                }
+        }
+        //ASUS_BSP Johnny ---[Qcom][PS][][Modify]Add the dns packet to the data stall trigger condition
 
 	data_counters_update(&entry->totals_via_skb, 0, direction, proto,
 			     bytes);
@@ -1711,7 +1747,8 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	MT_DEBUG("qtaguid[%d]: sk=%p got_sock=%d fam=%d proto=%d\n",
 		 par->hooknum, sk, got_sock, par->family, ipx_proto(skb, par));
 
-	if (!sk) {
+
+	if (sk == NULL) {
 		/*
 		 * Here, the qtaguid_find_sk() using connection tracking
 		 * couldn't find the owner, so for now we just count them
@@ -1728,9 +1765,12 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		goto put_sock_ret_res;
 	}
 	sock_uid = sk->sk_uid;
+	/*
+	 * TODO: unhack how to force just accounting.
+	 * For now we only do iface stats when the uid-owner is not requested
+	 */
 	if (do_tag_stat)
-		account_for_uid(skb, sk, from_kuid(&init_user_ns, sock_uid),
-				par);
+		account_for_uid(skb, sk, from_kuid(&init_user_ns, sock_uid), par);
 
 	/*
 	 * The following two tests fail the match when:
@@ -1742,8 +1782,8 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		kuid_t uid_min = make_kuid(&init_user_ns, info->uid_min);
 		kuid_t uid_max = make_kuid(&init_user_ns, info->uid_max);
 
-		if ((uid_gte(sock_uid, uid_min) &&
-		     uid_lte(sock_uid, uid_max)) ^
+		if ((uid_gte(sk->sk_uid, uid_min) &&
+		     uid_lte(sk->sk_uid, uid_max)) ^
 		    !(info->invert & XT_QTAGUID_UID)) {
 			MT_DEBUG("qtaguid[%d]: leaving uid not matching\n",
 				 par->hooknum);
@@ -1757,18 +1797,16 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		set_sk_callback_lock = true;
 		read_lock_bh(&sk->sk_callback_lock);
 		MT_DEBUG("qtaguid[%d]: sk=%pK->sk_socket=%pK->file=%pK\n",
-			 par->hooknum, sk, sk->sk_socket,
-			 sk->sk_socket ? sk->sk_socket->file : (void *)-1LL);
+			par->hooknum, sk, sk->sk_socket,
+			sk->sk_socket ? sk->sk_socket->file : (void *)-1LL);
 		filp = sk->sk_socket ? sk->sk_socket->file : NULL;
 		if (!filp) {
-			res = ((info->match ^ info->invert) &
-			       XT_QTAGUID_GID) == 0;
+			res = ((info->match ^ info->invert) & XT_QTAGUID_GID) == 0;
 			atomic64_inc(&qtu_events.match_no_sk_gid);
 			goto put_sock_ret_res;
 		}
 		MT_DEBUG("qtaguid[%d]: filp...uid=%u\n",
-			 par->hooknum, filp ?
-			 from_kuid(&init_user_ns, filp->f_cred->fsuid) : -1);
+			par->hooknum, filp ? from_kuid(&init_user_ns, filp->f_cred->fsuid) : -1);
 		if ((gid_gte(filp->f_cred->fsgid, gid_min) &&
 				gid_lte(filp->f_cred->fsgid, gid_max)) ^
 			!(info->invert & XT_QTAGUID_GID)) {
